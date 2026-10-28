@@ -15,3 +15,9 @@ Edit the Brand Kit with club name, teams, logos, colors, system fonts, sponsors 
 The preview uses the same 2D renderer and dimensions as **Share or download PNG**. On compatible mobile browsers this opens the operating-system share sheet; otherwise it downloads the file. External images that fail to load or lack CORS permission show a warning; upload a local copy you are permitted to use if needed. PostMAKER does not upload to Instagram or publish a site.
 
 The installable PWA can start offline only after one complete online visit. Updates appear as an explicit action and reload the app after activation. Installation steps for iPhone, Android and desktop browsers are in `install-iphone.md`; a separate checklist covers tests that require physical iPhone hardware.
+
+## Windows desktop
+
+PostMAKER Desktop opens the same editor in a Tauri window. Use **Open JSON or ZIP project**, **Save**, **Save as**, **Backup JSON**, **Backup ZIP** and **Export PNG file** for explicit local files. The current project path and last export path are shown in the interface. The application reads or writes a path only after it is selected in a Windows dialog. The IndexedDB local-project list remains a convenience cache and is not the saved project file.
+
+Desktop WebMAKER import uses the same public-data validator as the PWA. Internet access is optional for the core editor; HTTPS imports and remote images naturally need a connection. See `install-windows.md` for build and installation details.

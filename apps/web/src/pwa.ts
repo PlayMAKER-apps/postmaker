@@ -5,7 +5,7 @@ export interface PwaRegistrationOptions {
 }
 
 export async function registerPwa(options: PwaRegistrationOptions): Promise<ServiceWorkerRegistration | null> {
-  if (!import.meta.env.PROD || !('serviceWorker' in navigator)) return null;
+  if (!import.meta.env.PROD || '__TAURI_INTERNALS__' in window || !('serviceWorker' in navigator)) return null;
   try {
     const registration = await navigator.serviceWorker.register(`${import.meta.env.BASE_URL}sw.js`, { scope: import.meta.env.BASE_URL });
     if (registration.active) options.onReady();
