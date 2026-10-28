@@ -1,0 +1,82 @@
+{
+  "schema_version": "0.1",
+  "club": {
+    "id": "aurora-club",
+    "name": "Aurora Sport Club",
+    "sport": "basketball",
+    "timezone": "Europe/Rome",
+    "branding": {
+      "primary_color": "#153a7a",
+      "accent_color": "#f6c84c"
+    }
+  },
+  "squads": [
+    {
+      "id": "aurora",
+      "team_id": "aurora",
+      "label": "Aurora Sport Club"
+    }
+  ],
+  "teams": [
+    {
+      "id": "aurora",
+      "name": "Aurora Sport Club",
+      "short_name": "Aurora"
+    },
+    {
+      "id": "stella",
+      "name": "Stella Sports",
+      "short_name": "Stella"
+    },
+    {
+      "id": "vento",
+      "name": "Vento Sports Club",
+      "short_name": "Vento"
+    }
+  ],
+  "competitions": [
+    {
+      "id": "2026-27/amatori",
+      "name": "Amateur League",
+      "season": "2026-27",
+      "squad_ids": [
+        "aurora"
+      ]
+    }
+  ],
+  "fixtures": [
+    {
+      "id": "demo-01",
+      "competition_id": "2026-27/amatori",
+      "home_team_id": "aurora",
+      "away_team_id": "stella",
+      "date": "2026-09-20",
+      "status": "final",
+      "time": "18:00",
+      "venue": "Aurora Arena"
+    },
+    {
+      "id": "demo-02",
+      "competition_id": "2026-27/amatori",
+      "home_team_id": "vento",
+      "away_team_id": "aurora",
+      "date": "2026-11-08",
+      "status": "scheduled",
+      "time": "18:00",
+      "venue": "Vento Sports Center"
+    }
+  ],
+  "results": [
+    {
+      "fixture_id": "demo-01",
+      "home_score": 78,
+      "away_score": 72
+    }
+  ],
+  "source": {
+    "product": "webmaker",
+    "site_url": "https://example.github.io/",
+    "base_path": ""
+  },
+  "exported_at": "2026-10-28T10:00:00.000Z"
+}

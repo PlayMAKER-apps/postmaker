@@ -1,4 +1,5 @@
 import type { Match, Team } from '../../editor-core/src/model';
+export * from './club-public.ts';
 
 export interface ImportedGame {
   id: string; homeId: string; awayId: string; date: string; time: string;

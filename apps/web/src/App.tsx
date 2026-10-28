@@ -1,75 +1,248 @@
 import { useEffect, useRef, useState } from 'react';
-import { dimensions, exportPng, renderDesign, type Design, type Template } from '../../../packages/editor-core/src';
-import { importGamesCsv } from '../../../packages/data-connectors/src';
+import { activeGraphic, addGraphic, clampElement, copyTemplate, createDesign, createProject, dimensions, duplicateGraphic, exportPng, parseProject, renderDesign, serializeProject,
+  type BrandAsset, type Design, type ElementKind, type Match, type Project, type Template, type TemplateElement, type Team } from '../../../packages/editor-core/src';
+import { clubMatches, fetchClubPublic, importGamesCsv, parseClubPublic, resolvePublicImage, validateClubPublic, type PublicClubDocument } from '../../../packages/data-connectors/src';
 import { Field, Panel } from '../../../packages/ui/src';
+import { prepareImage } from './assets';
+import { deleteProject, listProjects, saveProject } from './storage';
 
-const sample = importGamesCsv('id,home_team,away_team,date,time,competition,venue,home_score,away_score\nsample-1,Harbor Hawks,River Foxes,2026-11-08,18:30,Community League,North Hall,72,68\nsample-2,Mountain Bears,Coastal Stars,2026-11-15,20:00,Community League,West Arena,,');
-const initial: Design = {
-  template: 'matchday', format: 'post', title: 'Game day', color: '#101b2d', accent: '#f0a64a',
-  match: sample[0], matches: sample, panX: 0, panY: 0, zoom: 1, blur: 0,
-  glasses: [{ id: 'sample-glass', kind: 'match', layer: 'front', x: 110, y: 310, width: 860, height: 630, match: sample[0] }]
-};
 const templates: Template[] = ['calendar', 'week', 'matchday', 'result'];
+const elementKinds: ElementKind[] = ['text', 'shape', 'glass', 'image', 'sponsor'];
+const newId = () => crypto.randomUUID();
+const blankMatch = (): Match => ({ id: newId(), home: { id: newId(), name: '' }, away: { id: newId(), name: '' }, competition: '', date: '', time: '', venue: '' });
+function downloadBlob(blob: Blob, filename: string) {
+  const url = URL.createObjectURL(blob), anchor = document.createElement('a');
+  anchor.href = url; anchor.download = filename; anchor.click();
+  setTimeout(() => URL.revokeObjectURL(url), 2000);
+}
+function imageOfTeam(team: Team, project: Project): Team {
+  const brandTeam = project.brand.teams.find(item => item.id === team.id || item.name.toLowerCase() === team.name.toLowerCase());
+  return { ...team, logo: team.logo || brandTeam?.logo };
+}
+function renderable(project: Project): Design {
+  const design = activeGraphic(project).design;
+  const matches = project.matches.map(match => ({ ...match, home: imageOfTeam(match.home, project), away: imageOfTeam(match.away, project) }));
+  return { ...design, matches, match: matches.find(match => match.id === design.selectedMatchId) ?? matches[0],
+    sponsor: design.sponsor || project.brand.sponsors[0]?.image,
+    elements: (design.elements ?? copyTemplate(design.template)).map(element => element.id === 'club-logo' && !element.image ? { ...element, image: project.brand.logo } : element) };
+}
 
 export function App() {
-  const [design, setDesign] = useState<Design>(initial);
+  const [projects, setProjects] = useState<Project[]>([]);
+  const [project, setProject] = useState<Project | null>(null);
+  const [loaded, setLoaded] = useState(false);
   const [message, setMessage] = useState('');
+  const [saveState, setSaveState] = useState('Saved locally');
   const [ready, setReady] = useState(false);
+  const [online, setOnline] = useState(navigator.onLine);
+  const [selectedElementId, setSelectedElementId] = useState('');
+  const [clubPreview, setClubPreview] = useState<{ document: PublicClubDocument; kind: 'file' | 'url'; url?: string } | null>(null);
+  const [clubUrl, setClubUrl] = useState('');
+  const [importMode, setImportMode] = useState(false);
   const canvas = useRef<HTMLCanvasElement>(null);
-  const sequence = useRef(0);
-  const update = (patch: Partial<Design>) => setDesign(current => ({ ...current, ...patch }));
+  const renderSequence = useRef(0);
+  const saveQueue = useRef<Promise<void>>(Promise.resolve());
 
   useEffect(() => {
-    const id = ++sequence.current;
-    const frame = document.createElement('canvas'); setReady(false);
-    renderDesign(frame, design).then(() => {
-      if (id !== sequence.current || !canvas.current) return;
-      canvas.current.width = frame.width; canvas.current.height = frame.height;
-      canvas.current.getContext('2d')?.drawImage(frame, 0, 0); setReady(true); setMessage('');
-    }).catch(error => { if (id === sequence.current) setMessage(error instanceof Error ? error.message : 'Render failed.'); });
-  }, [design]);
+    listProjects().then(items => setProjects(items.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))))
+      .catch(error => setMessage(error instanceof Error ? error.message : 'Local projects could not be loaded.'))
+      .finally(() => setLoaded(true));
+    const change = () => setOnline(navigator.onLine);
+    window.addEventListener('online', change); window.addEventListener('offline', change);
+    return () => { window.removeEventListener('online', change); window.removeEventListener('offline', change); };
+  }, []);
 
-  async function upload(file?: File) {
+  useEffect(() => {
+    if (!project) return;
+    setSaveState('Unsaved changes');
+    const timer = setTimeout(() => {
+      const snapshot = project;
+      setSaveState('Saving locally…');
+      saveQueue.current = saveQueue.current.catch(() => {}).then(() => saveProject(snapshot));
+      saveQueue.current.then(() => { setSaveState('Saved locally'); setProjects(items => [snapshot, ...items.filter(item => item.id !== snapshot.id)].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))); })
+        .catch(error => { setSaveState('Save failed'); setMessage(error instanceof Error ? error.message : 'Local save failed. Export a JSON backup.'); });
+    }, 350);
+    return () => clearTimeout(timer);
+  }, [project]);
+
+  const design = project ? activeGraphic(project).design : null;
+  const liveDesign = project ? renderable(project) : null;
+  const selected = design?.elements?.find(element => element.id === selectedElementId);
+  useEffect(() => {
+    if (!liveDesign) return;
+    const id = ++renderSequence.current, frame = document.createElement('canvas');
+    setReady(false);
+    renderDesign(frame, liveDesign).then(warnings => {
+      if (id !== renderSequence.current || !canvas.current) return;
+      canvas.current.width = frame.width; canvas.current.height = frame.height;
+      canvas.current.getContext('2d')?.drawImage(frame, 0, 0);
+      setReady(true);
+      if (warnings.length) setMessage(warnings.join(' '));
+    }).catch(error => { if (id === renderSequence.current) setMessage(error instanceof Error ? error.message : 'Rendering failed.'); });
+  }, [project]);
+
+  function changeProject(map: (current: Project) => Project) {
+    setProject(current => current ? { ...map(current), updatedAt: new Date().toISOString() } : current);
+  }
+  function changeDesign(patch: Partial<Design>) {
+    changeProject(current => ({ ...current, graphics: current.graphics.map(graphic => graphic.id === current.activeGraphicId ? { ...graphic, design: { ...graphic.design, ...patch } } : graphic) }));
+  }
+  function changeElement(id: string, patch: Partial<TemplateElement>) {
+    if (!design) return;
+    changeDesign({ elements: (design.elements ?? []).map(element => element.id === id ? clampElement({ ...element, ...patch }) : element) });
+  }
+  function selectTemplate(template: Template) {
+    if (!project || !design) return;
+    const fresh = createDesign(template, project.brand);
+    changeDesign({ ...fresh, format: design.format, selectedMatchId: design.selectedMatchId, background: design.background, backgroundSourceSize: design.backgroundSourceSize, color: design.color, accent: design.accent });
+    setSelectedElementId('');
+  }
+  function addMatch() {
+    const match = blankMatch();
+    changeProject(current => ({ ...current, matches: [...current.matches, match], graphics: current.graphics.map(graphic => graphic.id === current.activeGraphicId ? { ...graphic, design: { ...graphic.design, selectedMatchId: match.id } } : graphic) }));
+  }
+  function changeMatch(patch: Partial<Match>) {
+    if (!design?.selectedMatchId) return;
+    changeProject(current => ({ ...current, matches: current.matches.map(match => match.id === design.selectedMatchId ? { ...match, ...patch } : match) }));
+  }
+  function changeScore(side: 'homeScore' | 'awayScore', value: string) {
+    if (value && !/^\d{1,3}$/.test(value)) return;
+    changeMatch({ [side]: value === '' ? undefined : Number(value) });
+  }
+  async function upload(file: File | undefined, apply: (data: string, size: { width: number; height: number }) => void, transparent = false) {
     if (!file) return;
-    if (!file.type.startsWith('image/')) { setMessage('Choose an image file.'); return; }
-    const reader = new FileReader();
-    reader.onload = () => update({ background: String(reader.result) });
-    reader.readAsDataURL(file);
+    try { const prepared = await prepareImage(file, transparent); apply(prepared.data, prepared); setMessage('Image added to this local project.'); }
+    catch (error) { setMessage(error instanceof Error ? error.message : 'Image upload failed.'); }
+  }
+  async function uploadSubject(file?: File) {
+    if (!file || !design) return;
+    if (file.type !== 'image/png') { setMessage('The subject overlay must be a transparent PNG.'); return; }
+    if (!design.backgroundSourceSize) { setMessage('Add a background photo first.'); return; }
+    try {
+      const prepared = await prepareImage(file, true);
+      if (prepared.width !== design.backgroundSourceSize.width || prepared.height !== design.backgroundSourceSize.height) throw new Error('The subject PNG must match the background photo dimensions.');
+      changeDesign({ subject: prepared.data }); setMessage('Subject overlay added.');
+    } catch (error) { setMessage(error instanceof Error ? error.message : 'Subject upload failed.'); }
+  }
+  function changeBrandColor(key: 'primaryColor' | 'accentColor', value: string) {
+    changeProject(current => ({ ...current,
+      brand: { ...current.brand, [key]: value },
+      graphics: current.graphics.map(graphic => graphic.id === current.activeGraphicId ? { ...graphic, design: { ...graphic.design, [key === 'primaryColor' ? 'color' : 'accent']: value } } : graphic)
+    }));
+  }
+  function savePreset() {
+    if (!design) return;
+    const name = prompt('Preset name', `${design.template} preset`);
+    if (!name?.trim()) return;
+    changeProject(current => ({ ...current, brand: { ...current.brand, presets: [...current.brand.presets,
+      { id: newId(), name: name.trim(), template: design.template, color: design.color, accent: design.accent, font: design.font ?? 'Arial', elements: structuredClone(design.elements ?? []) }] } }));
+  }
+  function applyPreset(id: string) {
+    const preset = project?.brand.presets.find(item => item.id === id);
+    if (!preset) return;
+    changeDesign({ template: preset.template, color: preset.color, accent: preset.accent, font: preset.font, elements: structuredClone(preset.elements) });
+    setSelectedElementId('');
   }
   async function importCsv(file?: File) {
     if (!file) return;
     try {
       const matches = importGamesCsv(await file.text());
-      update({ matches, match: matches[0], glasses: design.glasses.map(glass => glass.kind === 'match' ? { ...glass, match: matches[0] } : glass) });
+      changeProject(current => ({ ...current, matches, graphics: current.graphics.map(graphic => ({ ...graphic, design: { ...graphic.design, selectedMatchId: matches.some(match => match.id === graphic.design.selectedMatchId) ? graphic.design.selectedMatchId : matches[0]?.id } })) }));
       setMessage(`${matches.length} matches imported.`);
     } catch (error) { setMessage(error instanceof Error ? error.message : 'CSV import failed.'); }
   }
-  async function download() {
-    if (!canvas.current || !ready) return;
+  async function previewClubFile(file?: File) {
+    if (!file) return;
     try {
-      const url = URL.createObjectURL(await exportPng(canvas.current));
-      const link = document.createElement('a'); link.href = url; link.download = `postmaker-${design.template}.png`; link.click();
-      setTimeout(() => URL.revokeObjectURL(url), 1000);
-    } catch (error) { setMessage(error instanceof Error ? error.message : 'PNG export failed.'); }
+      if (file.size > 5_000_000) throw new Error('Public club file is too large.');
+      setClubPreview({ document: parseClubPublic(await file.text()), kind: 'file' });
+      setMessage('Public club data validated. Review the preview before importing.');
+    } catch (error) { setClubPreview(null); setMessage(error instanceof Error ? error.message : 'Public club import failed.'); }
   }
-  const setMatch = (patch: Partial<NonNullable<Design['match']>>) => {
-    if (!design.match) return;
-    const match = { ...design.match, ...patch };
-    update({ match, matches: design.matches.map(item => item.id === match.id ? match : item),
-      glasses: design.glasses.map(glass => glass.kind === 'match' && glass.match?.id === match.id ? { ...glass, match } : glass) });
-  };
-  const setMatchText = (field: 'competition' | 'date' | 'time' | 'venue', value: string) => setMatch({ [field]: value });
-  const size = dimensions(design);
-  return <div className="app">
-    <header><img src="/postmaker.png" alt="PostMAKER logo" /><div><p>PLAYMAKER / POSTMAKER</p><h1>Sports graphics workspace</h1></div><span className="badge">Prototype 0.1</span></header>
+  async function previewClubUrl(url = clubUrl) {
+    try {
+      const document = await fetchClubPublic(url);
+      setClubPreview({ document, kind: 'url', url });
+      setMessage('Public club data validated. Review the preview before importing.');
+    } catch (error) { setClubPreview(null); setMessage(error instanceof Error ? error.message : 'Public club fetch failed.'); }
+  }
+  function applyClubPreview() {
+    if (!clubPreview) return;
+    const { document, kind, url } = clubPreview;
+    const imported = clubMatches(document);
+    changeProject(current => {
+      const byId = new Map(current.matches.map(match => [match.id, match]));
+      for (const match of imported) byId.set(match.id, match);
+      const teams = document.squads.map(squad => document.teams.find(team => team.id === squad.team_id)!).map(team => ({ id: team.id, name: team.name, logo: resolvePublicImage(team.logo_url, document) }));
+      const firstMatch = imported[0]?.id;
+      return { ...current, name: current.name === 'My club' ? document.club.name : current.name,
+        brand: { ...current.brand, clubName: document.club.name, primaryColor: document.club.branding.primary_color, accentColor: document.club.branding.accent_color,
+          logo: resolvePublicImage(document.club.branding.logo_url, document), teams,
+          sponsors: (document.sponsors ?? []).map(sponsor => ({ id: sponsor.id, name: sponsor.name, image: resolvePublicImage(sponsor.logo_url, document)!, license: sponsor.license ?? 'Public source' })) },
+        matches: [...byId.values()],
+        graphics: current.graphics.map(graphic => graphic.id === current.activeGraphicId ? { ...graphic, design: {
+          ...graphic.design, color: document.club.branding.primary_color, accent: document.club.branding.accent_color,
+          selectedMatchId: graphic.design.selectedMatchId || firstMatch
+        } } : graphic),
+        publicSource: { kind, url, exportedAt: document.exported_at, importedAt: new Date().toISOString(),
+          selectedSquadId: document.squads[0]?.id, selectedRosterId: document.rosters?.[0]?.id, snapshot: document }
+      };
+    });
+    setClubPreview(null); setImportMode(false); setMessage(`${imported.length} public fixtures imported. Missing fields remain editable.`);
+  }
+  async function importJson(file?: File) {
+    if (!file) return;
+    try {
+      const imported = parseProject(await file.text());
+      if (imported.publicSource) validateClubPublic(imported.publicSource.snapshot);
+      if (projects.some(item => item.id === imported.id) && !confirm(`Replace local project "${imported.name}" with this backup?`)) return;
+      await saveProject(imported);
+      setProjects(items => [imported, ...items.filter(item => item.id !== imported.id)]);
+      setProject(imported); setSelectedElementId(''); setMessage('Backup imported.');
+    } catch (error) { setMessage(error instanceof Error ? error.message : 'Project import failed.'); }
+  }
+  async function closeProject() {
+    if (!project) return;
+    try { await saveQueue.current.catch(() => {}); await saveProject(project); setProject(null); setSelectedElementId(''); setSaveState('Saved locally'); }
+    catch (error) { setMessage(error instanceof Error ? error.message : 'Save failed. Export a JSON backup before closing.'); }
+  }
+  async function removeProject(item: Project) {
+    if (!confirm(`Delete local project "${item.name}"? Export a backup first if needed.`)) return;
+    try { await deleteProject(item.id); setProjects(items => items.filter(project => project.id !== item.id)); if (project?.id === item.id) setProject(null); }
+    catch (error) { setMessage(error instanceof Error ? error.message : 'Project deletion failed.'); }
+  }
+  function exportJson() {
+    if (!project) return;
+    try { downloadBlob(new Blob([serializeProject(project)], { type: 'application/json' }), `${project.name.trim().replace(/[^a-z0-9-]+/gi, '-').toLowerCase() || 'postmaker'}-backup.json`); }
+    catch (error) { setMessage(error instanceof Error ? error.message : 'Backup export failed.'); }
+  }
+  async function exportImage() {
+    if (!ready || !canvas.current || !design) return;
+    try { downloadBlob(await exportPng(canvas.current), `postmaker-${design.template}-${design.format}.png`); }
+    catch (error) { setMessage(error instanceof Error ? error.message : 'PNG export failed.'); }
+  }
+  function addElement(kind: ElementKind) {
+    if (!design) return;
+    const element: TemplateElement = { id: newId(), kind, layer: 'front', x: 110, y: 310, width: kind === 'text' ? 500 : 700, height: kind === 'text' ? 110 : 420, visible: true, text: kind === 'text' ? 'Your text' : undefined, matchId: design.selectedMatchId };
+    changeDesign({ elements: [...(design.elements ?? []), element] }); setSelectedElementId(element.id);
+  }
+  const match = project?.matches.find(item => item.id === design?.selectedMatchId);
+  let connected: PublicClubDocument | null = null;
+  try { if (project?.publicSource) connected = validateClubPublic(project.publicSource.snapshot); } catch { /* A damaged cache can be disconnected. */ }
+  const size = design ? dimensions(design) : null;
+
+  if (!loaded) return <div className="loading">Loading local projects…</div>;
+  if (!project || !design || !size) return <div className="app"><header><img src="/postmaker.png" alt="PostMAKER logo" /><div><p>PLAYMAKER / POSTMAKER</p><h1>Sports graphics workspace</h1></div><span className="badge">{online ? 'Offline ready' : 'Offline'}</span></header>
+    <main className="welcome"><div className="welcome-lead"><p className="eyebrow">WELCOME</p><h2>Create sports graphics on your device</h2><p>Start manually, keep your match data in one project, and export a JSON backup for safekeeping. No account or AI service is required.</p><div className="welcome-actions"><button className="primary" onClick={() => { const next = createProject(); setProject(next); }}>Start Manual mode</button><button onClick={() => { const next = createProject(); setProject(next); setImportMode(true); }}>Import from WebMAKER</button><label className="file-button">Import project JSON<input type="file" accept=".json,application/json" onChange={event => void importJson(event.target.files?.[0])} /></label></div></div>
+    <section className="project-list"><h2>Local projects</h2>{projects.length ? projects.map(item => <div className="project-row" key={item.id}><div><strong>{item.name}</strong><small>{item.graphics.length} graphics · {item.matches.length} matches</small></div><button onClick={() => setProject(item)}>Open</button><button className="quiet" onClick={() => void removeProject(item)}>Delete</button></div>) : <p>No local projects yet.</p>}<small>Browser storage can be cleared. Export a JSON backup regularly.</small></section>{message && <p role="status" className="message">{message}</p>}</main></div>;
+
+  return <div className="app"><header><img src="/postmaker.png" alt="PostMAKER logo" /><div><p>PLAYMAKER / POSTMAKER</p><h1>{project.name}</h1></div><span className="badge">{online ? saveState : `${saveState} · offline`}</span></header>
+    <nav className="toolbar"><button onClick={() => void closeProject()}>Projects</button><select aria-label="Current graphic" value={project.activeGraphicId} onChange={event => changeProject(current => ({ ...current, activeGraphicId: event.target.value }))}>{project.graphics.map(graphic => <option key={graphic.id} value={graphic.id}>{graphic.name}</option>)}</select><button onClick={() => changeProject(current => addGraphic(current, design.template))}>New graphic</button><button onClick={() => changeProject(current => duplicateGraphic(current, current.activeGraphicId))}>Duplicate</button><button className="backup" onClick={exportJson}>Export backup JSON</button></nav>
     <main><div className="controls">
-      <Panel title="1. Composition"><div className="template-grid">{templates.map(template => <button key={template} className={design.template === template ? 'selected' : ''} onClick={() => update({ template })}>{template}</button>)}</div>
-        <div className="format-grid"><button className={design.format === 'post' ? 'selected' : ''} onClick={() => update({ format: 'post' })}>Post · 1080 × 1350</button><button className={design.format === 'story' ? 'selected' : ''} onClick={() => update({ format: 'story' })}>Story · 1080 × 1920</button></div>
-        <Field label="Headline" value={design.title} onChange={title => update({ title })} /><div className="colors"><label>Background<input type="color" value={design.color} onChange={event => update({ color: event.target.value })} /></label><label>Accent<input type="color" value={design.accent} onChange={event => update({ accent: event.target.value })} /></label></div></Panel>
-      <Panel title="2. Match data"><p>Import a CSV with home_team, away_team and date columns, or edit the selected match.</p><label className="file-button">Import match CSV<input type="file" accept=".csv,text/csv" onChange={event => void importCsv(event.target.files?.[0])} /></label>
-        <select aria-label="Selected match" value={design.match?.id ?? ''} onChange={event => { const match = design.matches.find(item => item.id === event.target.value); update({ match }); }}>{design.matches.map(match => <option key={match.id} value={match.id}>{match.home.name} vs {match.away.name}</option>)}</select>
-        {design.match && <div className="fields"><Field label="Home team" value={design.match.home.name} onChange={name => setMatch({ home: { ...design.match!.home, name } })} /><Field label="Away team" value={design.match.away.name} onChange={name => setMatch({ away: { ...design.match!.away, name } })} /><Field label="Competition" value={design.match.competition} onChange={value => setMatchText('competition', value)} /><Field label="Date" value={design.match.date} onChange={value => setMatchText('date', value)} /><Field label="Time" value={design.match.time} onChange={value => setMatchText('time', value)} /><Field label="Venue" value={design.match.venue} onChange={value => setMatchText('venue', value)} /></div>}</Panel>
-      <Panel title="3. Background"><label className="file-button">Choose local image<input type="file" accept="image/*" onChange={event => void upload(event.target.files?.[0])} /></label><div className="fields"><label>Zoom · {design.zoom.toFixed(2)}<input type="range" min="1" max="2" step=".05" value={design.zoom} onChange={event => update({ zoom: Number(event.target.value) })} /></label><label>Horizontal pan<input type="range" min="-1" max="1" step=".05" value={design.panX} onChange={event => update({ panX: Number(event.target.value) })} /></label><label>Vertical pan<input type="range" min="-1" max="1" step=".05" value={design.panY} onChange={event => update({ panY: Number(event.target.value) })} /></label><label>Blur · {design.blur}px<input type="range" min="0" max="30" value={design.blur} onChange={event => update({ blur: Number(event.target.value) })} /></label></div></Panel>
-    </div><aside className="preview"><div className="preview-title"><h2>Live preview</h2><span>{size.width} × {size.height} px</span></div><canvas ref={canvas} aria-label="PostMAKER design preview" /><button className="export" disabled={!ready} onClick={() => void download()}>Download PNG</button>{message && <p role="status">{message}</p>}<small>Files stay in this browser session. This is an early editor prototype.</small></aside></main>
-  </div>;
+      <Panel title="WebMAKER public data"><p>Import a public club 0.1 JSON file or HTTPS URL. Data is validated before it changes this project.</p><div className="action-row"><label className="file-button">Choose public JSON<input type="file" accept=".json,application/json" onChange={event => void previewClubFile(event.target.files?.[0])} /></label><input aria-label="Public club HTTPS URL" type="url" placeholder="https://club.example/data/playmaker-club-0.1.json" value={clubUrl} onChange={event => setClubUrl(event.target.value)} /><button onClick={() => void previewClubUrl()} disabled={!clubUrl.trim()}>Preview URL</button></div>{clubPreview && <div className="import-preview"><strong>{clubPreview.document.club.name}</strong><p>{clubPreview.document.club.sport} · {clubPreview.document.teams.length} teams · {clubPreview.document.squads.length} squads · {clubPreview.document.fixtures.length} fixtures · {clubPreview.document.results.length} results · {clubPreview.document.rosters?.length ?? 0} rosters</p><p>Exported {clubPreview.document.exported_at}. Available fields: team names, competition, date, time, venue, scores{clubPreview.document.players ? ', players and rosters' : ''}.</p><ul>{clubPreview.document.fixtures.slice(0, 5).map(fixture => <li key={fixture.id}>{fixture.date} · {fixture.home_team_id} vs {fixture.away_team_id} · {fixture.status}</li>)}</ul><button className="primary" onClick={applyClubPreview}>Import into project</button><button className="quiet" onClick={() => setClubPreview(null)}>Cancel</button></div>}{connected && project.publicSource && <div className="connected-data"><p>Data updated at {project.publicSource.exportedAt} · imported {project.publicSource.importedAt} · {project.publicSource.kind === 'url' ? 'HTTPS source' : 'local file cache'}</p><div className="action-row">{project.publicSource.kind === 'url' && <button onClick={() => void previewClubUrl(project.publicSource?.url)}>Refresh</button>}<button className="quiet" onClick={() => changeProject(current => ({ ...current, publicSource: undefined }))}>Disconnect source</button></div><div className="fields"><label>Squad<select value={project.publicSource.selectedSquadId ?? ''} onChange={event => changeProject(current => ({ ...current, publicSource: { ...current.publicSource!, selectedSquadId: event.target.value, selectedRosterId: undefined } }))}><option value="">Choose squad</option>{connected.squads.map(squad => <option key={squad.id} value={squad.id}>{squad.label ?? squad.id}</option>)}</select></label><label>Roster<select value={project.publicSource.selectedRosterId ?? ''} onChange={event => changeProject(current => ({ ...current, publicSource: { ...current.publicSource!, selectedRosterId: event.target.value } }))}><option value="">Choose roster</option>{(connected.rosters ?? []).filter(roster => !project.publicSource?.selectedSquadId || roster.squad_id === project.publicSource.selectedSquadId).map(roster => <option key={roster.id} value={roster.id}>{roster.id}</option>)}</select></label></div>{project.publicSource.selectedRosterId && <label className="field"><span>Use roster player in selected match</span><select value="" onChange={event => { const player = connected.players?.find(item => item.id === event.target.value); if (player) changeMatch({ player: player.name }); }}><option value="">Choose player</option>{(connected.rosters ?? []).find(roster => roster.id === project.publicSource?.selectedRosterId)?.player_ids.map(id => { const player = connected.players?.find(item => item.id === id); return player ? <option key={id} value={id}>{player.name}</option> : null; })}</select></label>}</div>}{importMode && !clubPreview && !connected && <p>Choose a WebMAKER public export to begin.</p>}</Panel>
+      <Panel title="1. Project and template"><div className="fields"><Field label="Project name" value={project.name} onChange={name => changeProject(current => ({ ...current, name }))} /><Field label="Graphic name" value={activeGraphic(project).name} onChange={name => changeProject(current => ({ ...current, graphics: current.graphics.map(graphic => graphic.id === current.activeGraphicId ? { ...graphic, name } : graphic) }))} /></div><div className="template-grid">{templates.map(template => <button key={template} className={design.template === template ? 'selected' : ''} onClick={() => selectTemplate(template)}>{template}</button>)}</div><div className="format-grid">{(['post', 'story', 'square'] as const).map(format => <button key={format} className={design.format === format ? 'selected' : ''} onClick={() => changeDesign({ format })}>{format} · 1080 × {format === 'story' ? '1920' : format === 'square' ? '1080' : '1350'}</button>)}</div><Field label="Headline" value={design.title} onChange={title => changeDesign({ title })} /></Panel>
+      <Panel title="2. Brand Kit"><div className="fields"><Field label="Club name" value={project.brand.clubName} onChange={clubName => changeProject(current => ({ ...current, brand: { ...current.brand, clubName } }))} /><label>Font<select value={project.brand.font} onChange={event => { const font = event.target.value as Design['font']; changeProject(current => ({ ...current, brand: { ...current.brand, font: font! } })); changeDesign({ font }); }}><option>Arial</option><option>Georgia</option><option>Trebuchet MS</option></select></label><label>Primary color<input type="color" value={design.color} onChange={event => changeBrandColor('primaryColor', event.target.value)} /></label><label>Accent color<input type="color" value={design.accent} onChange={event => changeBrandColor('accentColor', event.target.value)} /></label></div><label className="file-button">Upload club logo<input type="file" accept="image/png,image/jpeg,image/webp" onChange={event => void upload(event.target.files?.[0], data => changeProject(current => ({ ...current, brand: { ...current.brand, logo: data } })))} /></label><div className="subheading"><strong>Teams</strong><button onClick={() => changeProject(current => ({ ...current, brand: { ...current.brand, teams: [...current.brand.teams, { id: newId(), name: 'New team' }] } }))}>Add team</button></div>{project.brand.teams.map(team => <div className="team-row" key={team.id}><Field label="Team name" value={team.name} onChange={name => changeProject(current => ({ ...current, brand: { ...current.brand, teams: current.brand.teams.map(item => item.id === team.id ? { ...item, name } : item) } }))} /><label className="file-button">Logo<input type="file" accept="image/png,image/jpeg,image/webp" onChange={event => void upload(event.target.files?.[0], data => changeProject(current => ({ ...current, brand: { ...current.brand, teams: current.brand.teams.map(item => item.id === team.id ? { ...item, logo: data } : item) } })))} /></label><button className="quiet" onClick={() => changeProject(current => ({ ...current, brand: { ...current.brand, teams: current.brand.teams.filter(item => item.id !== team.id) } }))}>Remove</button></div>)}<div className="subheading"><strong>Sponsors and assets</strong><label className="file-button">Add sponsor<input type="file" accept="image/png,image/jpeg,image/webp" onChange={event => void upload(event.target.files?.[0], data => { const asset: BrandAsset = { id: newId(), name: event.target.files?.[0]?.name ?? 'Sponsor', image: data, license: 'User supplied' }; changeProject(current => ({ ...current, brand: { ...current.brand, sponsors: [...current.brand.sponsors, asset] } })); })} /></label></div>{project.brand.sponsors.map(asset => <div className="asset-row" key={asset.id}><span>{asset.name}</span><input aria-label={`License for ${asset.name}`} value={asset.license} onChange={event => changeProject(current => ({ ...current, brand: { ...current.brand, sponsors: current.brand.sponsors.map(item => item.id === asset.id ? { ...item, license: event.target.value } : item) } }))} /><button className="quiet" onClick={() => changeProject(current => ({ ...current, brand: { ...current.brand, sponsors: current.brand.sponsors.filter(item => item.id !== asset.id) } }))}>Remove</button></div>)}</Panel>
+      <Panel title="Brand assets and presets"><div className="action-row"><label className="file-button">Add brand asset<input type="file" accept="image/png,image/jpeg,image/webp" onChange={event => { const file = event.target.files?.[0]; void upload(file, data => { const asset: BrandAsset = { id: newId(), name: file?.name ?? 'Asset', image: data, license: 'User supplied' }; changeProject(current => ({ ...current, brand: { ...current.brand, assets: [...current.brand.assets, asset] } })); }); }} /></label><button onClick={savePreset}>Save current as preset</button></div>{project.brand.assets.map(asset => <div className="asset-row" key={asset.id}><span>{asset.name}</span><input aria-label={`License for ${asset.name}`} value={asset.license} onChange={event => changeProject(current => ({ ...current, brand: { ...current.brand, assets: current.brand.assets.map(item => item.id === asset.id ? { ...item, license: event.target.value } : item) } }))} />{selected && (selected.kind === 'image' || selected.kind === 'sponsor') && <button onClick={() => changeElement(selected.id, { image: asset.image })}>Use in layer</button>}<button className="quiet" onClick={() => changeProject(current => ({ ...current, brand: { ...current.brand, assets: current.brand.assets.filter(item => item.id !== asset.id) } }))}>Remove</button></div>)}<label className="field"><span>Apply preset</span><select value="" onChange={event => applyPreset(event.target.value)}><option value="">Choose preset</option>{project.brand.presets.map(preset => <option key={preset.id} value={preset.id}>{preset.name}</option>)}</select></label></Panel>      <Panel title="3. Match data"><p>Matches belong to this project and can be reused by every graphic.</p><div className="action-row"><button onClick={addMatch}>Add match manually</button><label className="file-button">Import match CSV<input type="file" accept=".csv,text/csv" onChange={event => void importCsv(event.target.files?.[0])} /></label></div><select aria-label="Selected match" value={design.selectedMatchId ?? ''} onChange={event => changeDesign({ selectedMatchId: event.target.value })}><option value="">Select a match</option>{project.matches.map(item => <option key={item.id} value={item.id}>{item.home.name || 'Home'} vs {item.away.name || 'Away'} · {item.date || 'No date'}</option>)}</select>{match && <><div className="fields"><Field label="Home team" value={match.home.name} onChange={name => changeMatch({ home: { ...match.home, name } })} /><Field label="Away team" value={match.away.name} onChange={name => changeMatch({ away: { ...match.away, name } })} /><Field label="Competition" value={match.competition} onChange={competition => changeMatch({ competition })} /><Field label="Date" value={match.date} type="date" onChange={date => changeMatch({ date })} /><Field label="Time" value={match.time} type="time" onChange={time => changeMatch({ time })} /><Field label="Venue" value={match.venue} onChange={venue => changeMatch({ venue })} /><Field label="Home score" value={match.homeScore == null ? '' : String(match.homeScore)} onChange={value => changeScore('homeScore', value)} /><Field label="Away score" value={match.awayScore == null ? '' : String(match.awayScore)} onChange={value => changeScore('awayScore', value)} /><Field label="Player" value={match.player ?? ''} onChange={player => changeMatch({ player })} /></div><button className="quiet" onClick={() => changeProject(current => ({ ...current, matches: current.matches.filter(item => item.id !== match.id), graphics: current.graphics.map(graphic => ({ ...graphic, design: graphic.design.selectedMatchId === match.id ? { ...graphic.design, selectedMatchId: undefined } : graphic.design })) }))}>Remove match</button></>}</Panel>
+      <Panel title="4. Photo and layers"><div className="action-row"><label className="file-button">Background photo<input type="file" accept="image/png,image/jpeg,image/webp" onChange={event => void upload(event.target.files?.[0], (data, sourceSize) => changeDesign({ background: data, backgroundSourceSize: sourceSize, subject: undefined }))} /></label><label className="file-button">Subject PNG<input type="file" accept="image/png" onChange={event => void uploadSubject(event.target.files?.[0])} /></label></div><div className="fields">{(['zoom', 'panX', 'panY', 'blur'] as const).map(key => <label key={key}>{key} · {design[key]}<input type="range" min={key === 'zoom' ? 1 : key === 'blur' ? 0 : -1} max={key === 'zoom' ? 2 : key === 'blur' ? 30 : 1} step={key === 'blur' ? 1 : .05} value={design[key]} onChange={event => changeDesign({ [key]: Number(event.target.value) })} /></label>)}</div><div className="subheading"><strong>Template layers</strong><div className="action-row">{elementKinds.map(kind => <button key={kind} onClick={() => addElement(kind)}>+ {kind}</button>)}</div></div><div className="layer-list">{design.elements?.map(element => <button key={element.id} className={selectedElementId === element.id ? 'selected' : ''} onClick={() => setSelectedElementId(element.id)}>{element.kind} · {element.id.slice(0, 8)}</button>)}</div>{selected && <div className="layer-editor"><div className="fields"><label>Layer<select value={selected.layer} onChange={event => changeElement(selected.id, { layer: event.target.value as TemplateElement['layer'] })}><option value="behind">Behind subject</option><option value="front">In front</option></select></label><label>Visible<input type="checkbox" checked={selected.visible !== false} onChange={event => changeElement(selected.id, { visible: event.target.checked })} /></label>{(['x', 'y', 'width', 'height'] as const).map(key => <label key={key}>{key}<input type="number" min="0" max={key === 'y' || key === 'height' ? 1350 : 1080} value={selected[key]} onChange={event => changeElement(selected.id, { [key]: Number(event.target.value) })} /></label>)}{(selected.kind === 'text' || selected.kind === 'headline') && <Field label="Text" value={selected.text ?? ''} onChange={text => changeElement(selected.id, { text })} />}{(selected.kind === 'shape' || selected.kind === 'text') && <label>Fill<input type="color" value={selected.fill || design.accent} onChange={event => changeElement(selected.id, { fill: event.target.value })} /></label>}{(selected.kind === 'glass' || selected.kind === 'match' || selected.kind === 'result') && <label>Match<select value={selected.matchId || ''} onChange={event => changeElement(selected.id, { matchId: event.target.value })}><option value="">Current match</option>{project.matches.map(item => <option key={item.id} value={item.id}>{item.home.name || 'Home'} vs {item.away.name || 'Away'}</option>)}</select></label>}</div>{(selected.kind === 'image' || selected.kind === 'sponsor') && <label className="file-button">Upload layer image<input type="file" accept="image/png,image/jpeg,image/webp" onChange={event => void upload(event.target.files?.[0], data => changeElement(selected.id, { image: data }))} /></label>}<div className="action-row"><button onClick={() => { const copy = { ...selected, id: newId(), x: Math.min(900, selected.x + 30), y: Math.min(1200, selected.y + 30) }; changeDesign({ elements: [...(design.elements ?? []), copy] }); setSelectedElementId(copy.id); }}>Duplicate layer</button><button className="quiet" onClick={() => { changeDesign({ elements: design.elements?.filter(item => item.id !== selected.id) }); setSelectedElementId(''); }}>Delete layer</button></div></div>}</Panel>
+    </div><aside className="preview"><div className="preview-title"><h2>Live preview</h2><span>{size.width} × {size.height} px</span></div><canvas ref={canvas} aria-label="PostMAKER design preview" /><button className="export" disabled={!ready} onClick={() => void exportImage()}>Download PNG</button><button className="backup secondary-backup" onClick={exportJson}>Export backup JSON</button>{message && <p role="status" className="message">{message}</p>}<small>Projects auto-save in this browser. Browser storage is not a permanent backup.</small></aside></main></div>;
 }
