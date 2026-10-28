@@ -4,6 +4,15 @@ const DB_NAME = 'postmaker-projects';
 const STORE = 'projects';
 const VERSION = 1;
 
+export interface StorageStatus { usage?: number; quota?: number; persisted?: boolean }
+
+function storageError(error: unknown): Error {
+  if (error instanceof DOMException && (error.name === 'QuotaExceededError' || error.name === 'NS_ERROR_DOM_QUOTA_REACHED')) {
+    return new Error('Browser storage is full. Export a JSON backup, then remove unused local projects or images.');
+  }
+  return error instanceof Error ? error : new Error('Local storage failed. Export a JSON backup.');
+}
+
 function openDatabase(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
     const request = indexedDB.open(DB_NAME, VERSION);
@@ -36,10 +45,36 @@ export async function saveProject(project: Project): Promise<void> {
       const transaction = db.transaction(STORE, 'readwrite');
       transaction.objectStore(STORE).put(project);
       transaction.oncomplete = () => resolve();
-      transaction.onerror = () => reject(transaction.error ?? new Error('Project save failed.'));
-      transaction.onabort = () => reject(transaction.error ?? new Error('Project save was aborted.'));
+      transaction.onerror = () => reject(storageError(transaction.error ?? new Error('Project save failed.')));
+      transaction.onabort = () => reject(storageError(transaction.error ?? new Error('Project save was aborted.')));
     });
   } finally { db.close(); }
+}
+
+export async function clearProjects(): Promise<void> {
+  const db = await openDatabase();
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const transaction = db.transaction(STORE, 'readwrite');
+      transaction.objectStore(STORE).clear();
+      transaction.oncomplete = () => resolve();
+      transaction.onerror = () => reject(storageError(transaction.error));
+      transaction.onabort = () => reject(storageError(transaction.error));
+    });
+  } finally { db.close(); }
+}
+
+export async function storageStatus(): Promise<StorageStatus> {
+  if (!navigator.storage) return {};
+  const [estimate, persisted] = await Promise.all([
+    navigator.storage.estimate(),
+    navigator.storage.persisted?.() ?? Promise.resolve(false)
+  ]);
+  return { usage: estimate.usage, quota: estimate.quota, persisted };
+}
+
+export async function requestPersistentStorage(): Promise<boolean> {
+  return navigator.storage?.persist ? navigator.storage.persist() : false;
 }
 
 export async function deleteProject(id: string): Promise<void> {

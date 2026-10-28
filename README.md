@@ -7,7 +7,7 @@ PostMAKER is the PlayMAKER product for creating sports social graphics. This rep
 - `packages/editor-core`: versioned template layers and a browser Canvas 2D renderer for Calendar, Week, Matchday and Result, image positioning, layered glass panels and PNG export.
 - `packages/data-connectors`: generic CSV import plus a validator and mapper for the separate PlayMAKER public club 0.1 JSON contract.
 - `packages/ui`: small reusable React controls.
-- `apps/web`: an offline-capable MVP editor with multiple local projects, Brand Kit, live preview, manual match data, WebMAKER public data import, JSON backup and PNG download. It is still an MVP, with browser integration and visual regression testing to complete.
+- `apps/web`: an installable PWA with multiple local projects, Brand Kit, live preview, manual match data, WebMAKER public data import, recoverable JSON backups and PNG sharing/download. It is built for the GitHub Pages `/postmaker/` path and can start offline after its first successful online load.
 - `apps/desktop`: reserved for a future desktop application; no desktop app is available yet.
 
 The prototype uses synthetic teams. The PostMAKER logo in `apps/web/public/postmaker.png` comes from the PlayMAKER workspace, supplied for this project.
@@ -21,10 +21,14 @@ npm install
 npm run typecheck
 npm test
 npm run build
+npx playwright install chromium
+npm run test:e2e
 npm run dev --workspace @postmaker/web
 ```
 
-Open the local URL printed by Vite. No deployment is configured. See the [user guide](docs/user-guide.md) and [developer guide](docs/developer-guide.md).
+Open the local URL printed by Vite. The workflow verifies pull requests and deploys `dist/web` to GitHub Pages only on a push to `main`; feature branches never deploy. See the [user guide](docs/user-guide.md), [installation tutorial](docs/install-iphone.md), [physical iPhone checklist](docs/iphone-physical-test-checklist.md) and [developer guide](docs/developer-guide.md).
+
+The public URL is expected to be `https://playmaker-apps.github.io/postmaker/` after GitHub Pages is enabled for Actions and an authorized merge reaches `main`.
 
 ## Import format
 
