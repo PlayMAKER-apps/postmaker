@@ -20,8 +20,8 @@ The source imports `lucide-react` for icons and uses React. Its CSS requests Goo
 
 ## Excluded assets and data
 
-No `elementi_social` PNG, club logo, sponsor artwork, player or team photo, roster, game database, hard-coded Nerone URL, or Nerone team name is included in the public build. `examples/synthetic-matches.csv` contains fictional teams and venues. Imported files stay local to the browser session.
+No `elementi_social` PNG, club logo, sponsor artwork, player or team photo, roster, game database, hard-coded Nerone URL, or Nerone team name is included in the public build. The examples contain fictional teams and venues. Imported files and images are stored in the browser's IndexedDB until removed by the user or browser; an exported JSON backup is needed for durable recovery.
 
 ## Implementation limits
 
-The new renderer supports all four composition categories at a basic level and maintains the general layered GLASS model. Its layouts are new and do not reproduce Nerone's branded templates. The web editor exposes only part of the core model: advanced glass editing, subject cutout upload, sponsor/logo upload, calendar month grouping, score styling, and robust source adapters remain to be developed. See the migration checklist.
+The new renderer supports all four composition categories and maintains the general layered GLASS model. Its layouts are new and do not reproduce Nerone's branded templates. The MVP editor supports layer geometry, subject cutout upload, sponsor/logo upload, shared matches and a public WebMAKER import. Calendar month grouping, full typography controls, richer score styling, browser integration tests and visual regression baselines remain to be developed. See the migration checklist.

@@ -4,3 +4,5 @@ https://github.com/PlayMAKER-apps/postmaker
 Copyright 2026 PlayMAKER contributors.
 
 The original Nerone Basket Anzio graphic generator was reviewed for functional requirements. No source files or club media from that repository are redistributed here. The PlayMAKER PostMAKER logo was supplied in the workspace for this product.
+
+PostMAKER Desktop includes or links to open-source dependencies. The principal runtime and build components are React (MIT), Vite (MIT), fflate (MIT), Tauri (Apache-2.0 OR MIT), tauri-plugin-dialog (Apache-2.0 OR MIT) and tauri-plugin-fs (Apache-2.0 OR MIT). Their complete transitive license texts and notices must be collected from the locked dependency graph for each distributed installer. No Microsoft Authenticode certificate or signed binary is included by this project.

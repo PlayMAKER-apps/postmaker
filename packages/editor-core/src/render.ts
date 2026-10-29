@@ -1,136 +1,126 @@
-import { clampGlass, dimensions, type Design, type Glass, type Match, WIDTH } from './model';
+import { clampElement, dimensions, type Design, type Match, type TemplateElement, WIDTH } from './model.ts';
+import { copyTemplate } from './templates.ts';
 
-type Context = CanvasRenderingContext2D;
-const cache = new Map<string, Promise<HTMLImageElement>>();
+type Ctx = CanvasRenderingContext2D;
+const imageCache = new Map<string, Promise<HTMLImageElement>>();
 
-async function loadImage(source?: string): Promise<HTMLImageElement | undefined> {
-  if (!source) return undefined;
-  if (!cache.has(source)) cache.set(source, new Promise((resolve, reject) => {
-    const image = new Image();
-    if (!source.startsWith('data:') && !source.startsWith('blob:')) image.crossOrigin = 'anonymous';
-    image.onload = () => resolve(image);
-    image.onerror = () => { cache.delete(source); reject(new Error('An image could not be loaded.')); };
-    image.src = source;
+async function image(source: string | undefined, warnings: string[]): Promise<HTMLImageElement | undefined> {
+  if (!source) return;
+  if (!imageCache.has(source)) imageCache.set(source, new Promise((resolve, reject) => {
+    const img = new Image();
+    if (!source.startsWith('data:') && !source.startsWith('blob:')) img.crossOrigin = 'anonymous';
+    img.onload = () => resolve(img);
+    img.onerror = () => { imageCache.delete(source); reject(new Error('Image unavailable or blocked by CORS.')); };
+    img.src = source;
   }));
-  return cache.get(source);
+  try { return await imageCache.get(source); }
+  catch { warnings.push('An image is missing or blocked by CORS.'); return; }
 }
 
-export function coverRect(imageWidth: number, imageHeight: number, width: number, height: number, zoom: number, panX: number, panY: number) {
-  if (imageWidth <= 0 || imageHeight <= 0 || width <= 0 || height <= 0) throw new Error('Image and canvas dimensions must be positive.');
-  const scale = Math.max(width / imageWidth, height / imageHeight) * Math.max(1, zoom);
-  const drawWidth = imageWidth * scale, drawHeight = imageHeight * scale;
-  const dx = (width - drawWidth) / 2 + Math.max(0, drawWidth - width) * Math.max(-1, Math.min(1, panX)) / 2;
-  const dy = (height - drawHeight) / 2 + Math.max(0, drawHeight - height) * Math.max(-1, Math.min(1, panY)) / 2;
-  return { x: dx, y: dy, width: drawWidth, height: drawHeight };
+export function coverRect(iw: number, ih: number, width: number, height: number, zoom: number, panX: number, panY: number) {
+  if (iw <= 0 || ih <= 0 || width <= 0 || height <= 0) throw new Error('Image dimensions must be positive.');
+  const scale = Math.max(width / iw, height / ih) * Math.max(1, zoom);
+  const w = iw * scale, h = ih * scale;
+  return { x: (width - w) / 2 + Math.max(0, w - width) * Math.max(-1, Math.min(1, panX)) / 2,
+    y: (height - h) / 2 + Math.max(0, h - height) * Math.max(-1, Math.min(1, panY)) / 2, width: w, height: h };
 }
-
-function cover(ctx: Context, image: HTMLImageElement, width: number, height: number, design: Design) {
-  const rect = coverRect(image.naturalWidth, image.naturalHeight, width, height, design.zoom, design.panX, design.panY);
-  ctx.drawImage(image, rect.x, rect.y, rect.width, rect.height);
+function cover(ctx: Ctx, img: HTMLImageElement, x: number, y: number, w: number, h: number, design: Design) {
+  const box = coverRect(img.naturalWidth, img.naturalHeight, w, h, design.zoom, design.panX, design.panY);
+  ctx.save(); ctx.beginPath(); ctx.rect(x, y, w, h); ctx.clip(); ctx.drawImage(img, x + box.x, y + box.y, box.width, box.height); ctx.restore();
 }
-
-function fit(ctx: Context, image: HTMLImageElement | undefined, x: number, y: number, width: number, height: number) {
-  if (!image) return;
-  const scale = Math.min(width / image.naturalWidth, height / image.naturalHeight);
-  const w = image.naturalWidth * scale, h = image.naturalHeight * scale;
-  ctx.drawImage(image, x + (width - w) / 2, y + (height - h) / 2, w, h);
+function fit(ctx: Ctx, img: HTMLImageElement | undefined, x: number, y: number, w: number, h: number) {
+  if (!img) return;
+  const s = Math.min(w / img.naturalWidth, h / img.naturalHeight), dw = img.naturalWidth * s, dh = img.naturalHeight * s;
+  ctx.drawImage(img, x + (w - dw) / 2, y + (h - dh) / 2, dw, dh);
 }
-
-function label(ctx: Context, value: string, x: number, y: number, maxWidth: number, size: number, align: CanvasTextAlign = 'left') {
-  ctx.textAlign = align; ctx.textBaseline = 'top';
-  ctx.font = `800 ${size}px Arial, sans-serif`;
-  ctx.fillText(value, x, y, maxWidth);
+function box(ctx: Ctx, x: number, y: number, w: number, h: number, fill: string) {
+  ctx.beginPath(); ctx.roundRect(x, y, w, h, Math.min(30, w / 10, h / 10)); ctx.fillStyle = fill; ctx.fill();
 }
-
-function panel(ctx: Context, x: number, y: number, width: number, height: number, color: string) {
-  ctx.beginPath(); ctx.roundRect(x, y, width, height, 30);
-  ctx.fillStyle = color; ctx.fill();
+function write(ctx: Ctx, value: string, x: number, y: number, w: number, size: number, design: Design, align: CanvasTextAlign = 'left') {
+  ctx.textAlign = align; ctx.textBaseline = 'top'; ctx.font = `bold ${size}px "${design.font ?? 'Arial'}", Arial, sans-serif`;
+  ctx.fillText(value, x, y, w);
 }
-
-async function drawMatchCard(ctx: Context, match: Match, x: number, y: number, width: number, height: number, accent: string) {
-  const [homeLogo, awayLogo] = await Promise.all([loadImage(match.home.logo), loadImage(match.away.logo)]);
+function selectedMatch(design: Design, element: TemplateElement): Match | undefined {
+  return design.matches.find(match => match.id === element.matchId) ?? design.match;
+}
+async function teamLogo(ctx: Ctx, source: string | undefined, name: string, x: number, y: number, size: number, design: Design, warnings: string[]) {
+  const loaded = await image(source, warnings);
+  if (loaded) fit(ctx, loaded, x, y, size, size);
+  else { box(ctx, x, y, size, size, '#ffffff28'); ctx.fillStyle = '#fff'; write(ctx, name.slice(0, 2).toUpperCase() || '?', x + size / 2, y + size * .32, size * .8, size * .35, design, 'center'); }
+}
+async function matchCard(ctx: Ctx, match: Match | undefined, x: number, y: number, w: number, h: number, design: Design, warnings: string[], glass: boolean) {
+  ctx.save(); ctx.shadowColor = '#0008'; ctx.shadowBlur = glass ? 26 : 0; box(ctx, x, y, w, h, glass ? '#172638db' : '#ffffff20'); ctx.restore();
+  if (glass) { ctx.strokeStyle = '#ffffffa0'; ctx.lineWidth = 2; ctx.beginPath(); ctx.roundRect(x, y, w, h, 30); ctx.stroke(); }
+  const inset = Math.max(22, w * .045), logo = Math.min(w * .2, h * .25);
+  ctx.fillStyle = '#fff'; write(ctx, match?.competition.toUpperCase() || 'COMPETITION', x + inset, y + h * .07, w - 2 * inset, Math.min(34, w * .045), design);
+  await teamLogo(ctx, match?.home.logo, match?.home.name ?? 'HOME', x + inset, y + h * .24, logo, design, warnings);
+  await teamLogo(ctx, match?.away.logo, match?.away.name ?? 'AWAY', x + w - inset - logo, y + h * .24, logo, design, warnings);
+  ctx.fillStyle = design.accent; write(ctx, 'VS', x + w / 2, y + h * .28, w * .18, Math.min(58, w * .07), design, 'center');
   ctx.fillStyle = '#fff';
-  label(ctx, match.competition.toUpperCase(), x + 26, y + 24, width - 52, Math.min(27, width * .06));
-  fit(ctx, homeLogo, x + 25, y + height * .22, width * .28, height * .26);
-  fit(ctx, awayLogo, x + width * .69, y + height * .22, width * .28, height * .26);
-  ctx.fillStyle = accent; label(ctx, 'VS', x + width / 2, y + height * .27, width * .22, 50, 'center');
+  write(ctx, match?.home.name || 'Home team', x + inset, y + h * .56, w * .43, 34, design);
+  write(ctx, match?.away.name || 'Away team', x + w - inset, y + h * .56, w * .43, 34, design, 'right');
+  ctx.font = `26px "${design.font ?? 'Arial'}", Arial, sans-serif`; ctx.textAlign = 'left';
+  ctx.fillText(`${match?.date || 'Date'}  ${match?.time || 'Time'}`, x + inset, y + h * .73, w - inset * 2);
+  ctx.fillText(match?.venue || 'Venue', x + inset, y + h * .83, w - inset * 2);
+  if (match?.player) ctx.fillText(`Player: ${match.player}`, x + inset, y + h * .91, w - inset * 2);
+}
+async function resultCard(ctx: Ctx, match: Match | undefined, x: number, y: number, w: number, h: number, design: Design, warnings: string[]) {
+  box(ctx, x, y, w, h, '#ffffff20'); const size = Math.min(210, w * .22);
+  await teamLogo(ctx, match?.home.logo, match?.home.name ?? 'HOME', x + w * .1, y + h * .14, size, design, warnings);
+  await teamLogo(ctx, match?.away.logo, match?.away.name ?? 'AWAY', x + w * .68, y + h * .14, size, design, warnings);
   ctx.fillStyle = '#fff';
-  label(ctx, match.home.name, x + 25, y + height * .55, width * .45, 30);
-  label(ctx, match.away.name, x + width - 25, y + height * .55, width * .45, 30, 'right');
-  ctx.font = '25px Arial, sans-serif'; ctx.textAlign = 'left';
-  ctx.fillText(`${match.date}  ${match.time}`, x + 25, y + height * .73, width - 50);
-  ctx.fillText(match.venue, x + 25, y + height * .84, width - 50);
+  write(ctx, match?.home.name || 'Home team', x + w * .22, y + h * .47, w * .4, 39, design, 'center');
+  write(ctx, match?.away.name || 'Away team', x + w * .78, y + h * .47, w * .4, 39, design, 'center');
+  const home = match?.homeScore == null ? '–' : String(match.homeScore), away = match?.awayScore == null ? '–' : String(match.awayScore);
+  ctx.fillStyle = design.accent; write(ctx, `${home} : ${away}`, x + w / 2, y + h * .66, w * .82, 140, design, 'center');
+  ctx.fillStyle = '#fff'; write(ctx, match?.competition || 'Competition', x + w / 2, y + h * .9, w * .8, 30, design, 'center');
+}
+function calendar(ctx: Ctx, matches: Match[], x: number, y: number, w: number, h: number, design: Design) {
+  const rowHeight = Math.min(145, h / Math.max(1, matches.length));
+  matches.slice(0, Math.floor(h / 90)).forEach((match, i) => {
+    const top = y + i * rowHeight;
+    box(ctx, x, top, w, rowHeight - 12, '#ffffff20');
+    ctx.fillStyle = design.accent; write(ctx, match.date, x + 24, top + 18, w * .22, 34, design);
+    ctx.fillStyle = '#fff'; write(ctx, `${match.home.name} — ${match.away.name}`, x + w * .26, top + 12, w * .7, 38, design);
+    ctx.font = `25px "${design.font ?? 'Arial'}", Arial, sans-serif`; ctx.textAlign = 'left';
+    ctx.fillText(`${match.time} · ${match.venue}`, x + w * .26, top + 64, w * .7);
+  });
+}
+async function drawElement(ctx: Ctx, source: TemplateElement, design: Design, outputHeight: number, warnings: string[]) {
+  if (source.visible === false) return;
+  const element = clampElement(source), { x, width: w } = element, y = element.y * outputHeight / 1350, h = element.height * outputHeight / 1350;
+  ctx.save(); ctx.beginPath(); ctx.rect(x, y, w, h); ctx.clip();
+  switch (element.kind) {
+    case 'headline': ctx.fillStyle = '#fff'; write(ctx, (element.text || design.title).toUpperCase(), x, y, w, Math.min(82, h * .83), design); break;
+    case 'calendar': calendar(ctx, design.matches, x, y, w, h, design); break;
+    case 'match': case 'glass': await matchCard(ctx, selectedMatch(design, element), x, y, w, h, design, warnings, element.kind === 'glass'); break;
+    case 'result': await resultCard(ctx, selectedMatch(design, element), x, y, w, h, design, warnings); break;
+    case 'text': ctx.fillStyle = element.fill || '#fff'; write(ctx, element.text || 'Text', x, y, w, Math.min(72, h * .75), design); break;
+    case 'shape': box(ctx, x, y, w, h, element.fill || design.accent); break;
+    case 'image': case 'sponsor': fit(ctx, await image(element.image || (element.kind === 'sponsor' ? design.sponsor : undefined), warnings), x, y, w, h); break;
+    case 'subject': { const loaded = await image(element.image || design.subject, warnings); if (loaded) cover(ctx, loaded, x, y, w, h, design); break; }
+  }
+  ctx.restore();
 }
 
-async function drawGlass(ctx: Context, raw: Glass, canvasHeight: number, accent: string) {
-  const glass = clampGlass(raw, canvasHeight);
-  const { x, y, width, height } = glass;
-  ctx.save();
-  ctx.shadowColor = '#0009'; ctx.shadowBlur = 28; ctx.shadowOffsetY = 12;
-  panel(ctx, x, y, width, height, '#101925b8');
-  ctx.restore();
-  ctx.save();
-  ctx.strokeStyle = '#ffffff9c'; ctx.lineWidth = 2;
-  ctx.beginPath(); ctx.roundRect(x, y, width, height, 30); ctx.stroke();
-  if (glass.kind === 'match' && glass.match) await drawMatchCard(ctx, glass.match, x, y, width, height, accent);
-  if (glass.kind === 'sponsor') fit(ctx, await loadImage(glass.image), x + 24, y + 24, width - 48, height - 48);
-  ctx.restore();
-}
-
-export async function renderDesign(canvas: HTMLCanvasElement, design: Design): Promise<void> {
-  const { height } = dimensions(design);
-  canvas.width = WIDTH; canvas.height = height;
-  const ctx = canvas.getContext('2d');
-  if (!ctx) throw new Error('Canvas 2D is unavailable.');
+export async function renderDesign(canvas: HTMLCanvasElement, design: Design): Promise<string[]> {
+  const { height } = dimensions(design); canvas.width = WIDTH; canvas.height = height;
+  const ctx = canvas.getContext('2d'); if (!ctx) throw new Error('Canvas 2D is unavailable.');
+  const warnings: string[] = [];
   if (typeof document !== 'undefined' && document.fonts) await document.fonts.ready;
   ctx.fillStyle = design.color; ctx.fillRect(0, 0, WIDTH, height);
-  const background = await loadImage(design.background);
+  const background = await image(design.background, warnings);
   if (background) {
-    ctx.save(); ctx.filter = `blur(${Math.max(0, Math.min(30, design.blur))}px)`;
-    cover(ctx, background, WIDTH, height, design); ctx.restore();
-    ctx.fillStyle = '#07111bc2'; ctx.fillRect(0, 0, WIDTH, height);
+    ctx.save(); ctx.filter = `blur(${Math.max(0, Math.min(30, design.blur))}px)`; cover(ctx, background, 0, 0, WIDTH, height, design); ctx.restore();
+    ctx.fillStyle = '#07111bb0'; ctx.fillRect(0, 0, WIDTH, height);
   }
   ctx.fillStyle = design.accent; ctx.fillRect(0, 0, 20, height);
-  ctx.fillStyle = '#fff';
-  label(ctx, design.title.toUpperCase(), 66, 66, 948, 82);
-  ctx.fillStyle = design.accent; ctx.fillRect(66, 178, 210, 9);
-
-  if (design.template === 'calendar') {
-    const matches = design.matches.slice(0, height === 1920 ? 10 : 7);
-    matches.forEach((match, index) => {
-      const y = 230 + index * 145;
-      panel(ctx, 64, y, 950, 122, '#ffffff20');
-      ctx.fillStyle = design.accent; label(ctx, match.date, 90, y + 18, 210, 35);
-      ctx.fillStyle = '#fff';
-      label(ctx, `${match.home.name}  —  ${match.away.name}`, 320, y + 15, 660, 38);
-      ctx.font = '25px Arial, sans-serif'; ctx.fillText(`${match.time}  ·  ${match.venue}`, 320, y + 72, 640);
-    });
-  }
-  if (design.template === 'matchday' && design.match) {
-    panel(ctx, 64, 255, 950, 700, '#ffffff20');
-    await drawMatchCard(ctx, design.match, 93, 300, 895, 600, design.accent);
-  }
-  if (design.template === 'result' && design.match) {
-    const match = design.match;
-    const [homeLogo, awayLogo] = await Promise.all([loadImage(match.home.logo), loadImage(match.away.logo)]);
-    panel(ctx, 64, 265, 950, 760, '#ffffff20');
-    fit(ctx, homeLogo, 130, 375, 240, 240); fit(ctx, awayLogo, 715, 375, 240, 240);
-    ctx.fillStyle = '#fff';
-    label(ctx, match.home.name, 252, 660, 360, 40, 'center');
-    label(ctx, match.away.name, 828, 660, 360, 40, 'center');
-    const homeScore = match.homeScore ?? 0, awayScore = match.awayScore ?? 0;
-    ctx.fillStyle = design.accent; label(ctx, `${homeScore} : ${awayScore}`, 540, 770, 800, 140, 'center');
-    ctx.fillStyle = '#fff'; label(ctx, match.competition, 540, 970, 800, 32, 'center');
-  }
-  if (design.template === 'week') {
-    for (const glass of design.glasses.filter(item => item.layer === 'behind')) await drawGlass(ctx, glass, height, design.accent);
-    const subject = await loadImage(design.subject);
-    if (subject) cover(ctx, subject, WIDTH, height, design);
-    for (const glass of design.glasses.filter(item => item.layer === 'front')) await drawGlass(ctx, glass, height, design.accent);
-  }
-  fit(ctx, await loadImage(design.sponsor), 760, height - 175, 235, 105);
+  const elements = design.elements ?? copyTemplate(design.template);
+  for (const item of elements.filter(e => e.kind !== 'subject' && e.layer === 'behind')) await drawElement(ctx, item, design, height, warnings);
+  for (const item of elements.filter(e => e.kind === 'subject')) await drawElement(ctx, item, design, height, warnings);
+  for (const item of elements.filter(e => e.kind !== 'subject' && e.layer === 'front')) await drawElement(ctx, item, design, height, warnings);
+  return [...new Set(warnings)];
 }
-
 export function exportPng(canvas: HTMLCanvasElement): Promise<Blob> {
   return new Promise((resolve, reject) => canvas.toBlob(blob => blob ? resolve(blob) : reject(new Error('PNG export failed.')), 'image/png'));
 }

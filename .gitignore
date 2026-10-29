@@ -1,6 +1,10 @@
 node_modules/
 dist/
 coverage/
+test-results/
+playwright-report/
+apps/desktop/src-tauri/target/
+apps/desktop/src-tauri/gen/schemas/
 *.tsbuildinfo
 .env*
 !.env.example
