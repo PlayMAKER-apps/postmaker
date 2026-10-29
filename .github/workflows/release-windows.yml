@@ -1,0 +1,64 @@
+name: Publish Windows release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Verify tag and desktop version
+        shell: pwsh
+        run: |
+          $config = Get-Content 'apps/desktop/src-tauri/tauri.conf.json' | ConvertFrom-Json
+          $expectedTag = "v$($config.version)"
+          if ('${{ github.ref_name }}' -ne $expectedTag) {
+            throw "Tag ${{ github.ref_name }} does not match desktop version $($config.version). Expected $expectedTag."
+          }
+      - run: npm ci
+      - run: npm run lint
+      - run: npm test
+      - run: npm audit --audit-level=high
+      - run: npm run desktop:build
+      - name: Create release checksums
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem 'apps/desktop/src-tauri/target/release/bundle/nsis' -Filter '*.exe' -File | Select-Object -First 1
+          $msi = Get-ChildItem 'apps/desktop/src-tauri/target/release/bundle/msi' -Filter '*.msi' -File | Select-Object -First 1
+          if (-not $exe -or -not $msi) { throw 'Both NSIS and MSI installers are required.' }
+          $lines = foreach ($file in @($exe, $msi)) {
+            $hash = Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256
+            "$($hash.Hash.ToLowerInvariant())  $($file.Name)"
+          }
+          $lines | Set-Content -LiteralPath 'SHA256SUMS.txt' -Encoding utf8NoBOM
+          Get-Content 'SHA256SUMS.txt'
+      - name: Publish unsigned Windows release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = '${{ github.ref_name }}'
+          $exe = Get-ChildItem 'apps/desktop/src-tauri/target/release/bundle/nsis' -Filter '*.exe' -File | Select-Object -First 1
+          $msi = Get-ChildItem 'apps/desktop/src-tauri/target/release/bundle/msi' -Filter '*.msi' -File | Select-Object -First 1
+          gh release view $tag --repo $env:GITHUB_REPOSITORY *> $null
+          if ($LASTEXITCODE -eq 0) {
+            gh release edit $tag --repo $env:GITHUB_REPOSITORY --title 'PostMAKER 0.3.0' --notes-file 'docs/release-0.3.md'
+            gh release upload $tag $exe.FullName $msi.FullName 'SHA256SUMS.txt' --repo $env:GITHUB_REPOSITORY --clobber
+          } else {
+            gh release create $tag $exe.FullName $msi.FullName 'SHA256SUMS.txt' --repo $env:GITHUB_REPOSITORY --verify-tag --title 'PostMAKER 0.3.0' --notes-file 'docs/release-0.3.md'
+          }
